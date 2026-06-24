@@ -95,19 +95,28 @@ jobs:
 
   # 5. Network: DNS, latency, bandwidth
   network:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 10
     steps:
       - name: Latency + DNS
         run: |
+          # Keep this fatal — the runner MUST reach github.com.
           curl -fsSL -o /dev/null \
             -w 'dns=%{time_namelookup}s connect=%{time_connect}s ttfb=%{time_starttransfer}s total=%{time_total}s\n' \
             https://github.com
-      - name: Download throughput (100MB)
+      - name: Download throughput (~100MB egress probe)
         run: |
-          curl -fsSL -o /dev/null \
-            -w 'downloaded=%{size_download}B speed=%{speed_download}B/s\n' \
-            'https://speed.cloudflare.com/__down?bytes=104857600'
+          # speed.cloudflare.com/__down returns 403 to datacenter egress IPs.
+          # Use mirrors that allow datacenter traffic, with a fallback.
+          # Non-fatal: a flaky external CDN must not fail (and cancel) a runner test.
+          probe() {
+            echo ">> $1"
+            curl -fsSL -o /dev/null --max-time 120 \
+              -w '   downloaded=%{size_download}B speed=%{speed_download}B/s http=%{http_code}\n' "$1"
+          }
+          probe "https://proof.ovh.net/files/100Mb.dat" \
+            || probe "https://ash-speed.hetzner.com/100MB.bin" \
+            || echo "::warning::bandwidth probe failed against all external hosts; continuing"
 
   # 6. Parallelism: fan out many concurrent jobs to test scheduling/capacity
   parallel-matrix:
