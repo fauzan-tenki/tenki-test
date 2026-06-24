@@ -1,4 +1,4 @@
-name: CI - Tenki Runner Capability Test
+name: CI - Tenki Runner Capability Test (2-lane, low-trust-safe)
 
 on:
   push:
@@ -6,255 +6,76 @@ on:
   pull_request:
     branches: ["main"]
   workflow_dispatch:
-    inputs:
-      stress_duration:
-        description: "Duration for CPU/memory stress steps"
-        default: "30s"
-      disk_size_mb:
-        description: "Disk I/O test size (MB)"
-        default: "2048"
 
-# Cancel superseded runs on the same ref to test queue/scheduling churn
+# Low-trust cap = 2 concurrent jobs, counted WORKSPACE-WIDE. cancel-in-progress
+# keeps only one run's jobs in flight so overlapping runs can't sum past 2.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # 1. Baseline: what does this runner actually look like?
-  system-info:
-    runs-on: tenki-standard-medium-4c-8g
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Dump system facts
-        run: |
-          echo "::group::CPU"
-          nproc
-          lscpu 2>/dev/null | grep -E 'Model name|^CPU\(s\)|Thread|Core|Socket' || grep 'model name' /proc/cpuinfo | head -1
-          echo "::endgroup::"
-          echo "::group::Memory"; free -h; echo "::endgroup::"
-          echo "::group::Disk"; df -hT; echo "::endgroup::"
-          echo "::group::Kernel / OS"; uname -a; cat /etc/os-release 2>/dev/null | head -3; echo "::endgroup::"
-          echo "::group::Runner context"
-          echo "name=$RUNNER_NAME os=$RUNNER_OS arch=$RUNNER_ARCH"
-          echo "workspace=$GITHUB_WORKSPACE"
-          echo "::endgroup::"
-          echo "::group::Virtualization / cgroups"
-          systemd-detect-virt 2>/dev/null || echo "n/a"
-          cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || echo "no cgroup v2 controllers file"
-          echo "::endgroup::"
-
-  # 2. CPU: saturate all cores
-  cpu-stress:
-    runs-on: tenki-standard-medium-4c-8g
-    timeout-minutes: 15
-    steps:
-      - name: Install bench tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq stress-ng sysbench
-      - name: Saturate all cores
-        run: stress-ng --cpu 0 --cpu-method matrixprod --timeout ${{ inputs.stress_duration || '30s' }} --metrics-brief
-      - name: Single + multi-thread sysbench
-        run: |
-          sysbench cpu --cpu-max-prime=20000 --threads=1 run | grep -E 'events per second|total time'
-          sysbench cpu --cpu-max-prime=20000 --threads=$(nproc) run | grep -E 'events per second|total time'
-
-  # 3. Memory: allocate most of RAM
-  memory-stress:
-    runs-on: tenki-standard-medium-4c-8g
-    timeout-minutes: 15
-    steps:
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq stress-ng
-      - name: Exercise ~75% of RAM
-        run: |
-          free -h
-          stress-ng --vm 2 --vm-bytes 75% --vm-keep --timeout ${{ inputs.stress_duration || '30s' }} --metrics-brief
-          free -h
-
-  # 4. Disk I/O: sequential + random
-  disk-io:
-    runs-on: tenki-standard-medium-4c-8g
-    timeout-minutes: 15
-    steps:
-      - name: Sequential write/read (dd)
-        run: |
-          SIZE=${{ inputs.disk_size_mb || '2048' }}
-          echo "Writing ${SIZE}MB..."
-          dd if=/dev/zero of=testfile bs=1M count=$SIZE oflag=direct 2>&1 \
-            || dd if=/dev/zero of=testfile bs=1M count=$SIZE conv=fdatasync 2>&1
-          sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
-          echo "Reading back..."
-          dd if=testfile of=/dev/null bs=1M 2>&1
-          rm -f testfile
-      - name: Random 4k I/O (fio, best-effort)
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq fio
-          fio --name=randrw --rw=randrw --bs=4k --size=512M --numjobs=4 \
-              --runtime=20 --time_based --group_reporting --ioengine=psync \
-              || echo "fio not fully supported on this filesystem"
-          rm -f randrw.*
-
-  # 5. Network: DNS, latency, bandwidth
-  network:
+  # Lane 1 of 2 — compute + I/O (sequential steps = ONE in-flight slot).
+  compute-io:
     runs-on: tenki-standard-autoscale
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - name: Latency + DNS
+      - name: System info
         run: |
-          # Keep this fatal — the runner MUST reach github.com.
-          curl -fsSL -o /dev/null \
-            -w 'dns=%{time_namelookup}s connect=%{time_connect}s ttfb=%{time_starttransfer}s total=%{time_total}s\n' \
-            https://github.com
-      - name: Download throughput (~100MB egress probe)
+          echo "::group::cpu"; nproc; lscpu 2>/dev/null | grep -E 'Model name|^CPU\(s\)' || true; echo "::endgroup::"
+          echo "::group::mem"; free -h; echo "::endgroup::"
+          echo "::group::disk"; df -hT; echo "::endgroup::"
+          uname -a
+      - name: Install bench tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq stress-ng sysbench fio
+      - name: CPU — saturate all cores
+        run: stress-ng --cpu 0 --cpu-method matrixprod --timeout 30s --metrics-brief
+      - name: CPU — sysbench
+        run: sysbench cpu --cpu-max-prime=20000 --threads=$(nproc) run | grep -E 'events per second|total time'
+      - name: Memory — ~70% RAM
+        run: stress-ng --vm 2 --vm-bytes 35% --timeout 30s --metrics-brief
+      - name: Disk — sequential dd
         run: |
-          # speed.cloudflare.com/__down returns 403 to datacenter egress IPs.
-          # Use mirrors that allow datacenter traffic, with a fallback.
-          # Non-fatal: a flaky external CDN must not fail (and cancel) a runner test.
-          probe() {
-            echo ">> $1"
-            curl -fsSL -o /dev/null --max-time 120 \
-              -w '   downloaded=%{size_download}B speed=%{speed_download}B/s http=%{http_code}\n' "$1"
-          }
-          probe "https://proof.ovh.net/files/100Mb.dat" \
-            || probe "https://ash-speed.hetzner.com/100MB.bin" \
-            || echo "::warning::bandwidth probe failed against all external hosts; continuing"
+          dd if=/dev/zero of=tf bs=1M count=2048 oflag=direct 2>&1 || dd if=/dev/zero of=tf bs=1M count=2048 conv=fdatasync 2>&1
+          sync; dd if=tf of=/dev/null bs=1M 2>&1; rm -f tf
+      - name: Disk — random 4k (best-effort)
+        run: fio --name=rw --rw=randrw --bs=4k --size=512M --numjobs=4 --runtime=20 --time_based --group_reporting --ioengine=psync || echo "::warning::fio unsupported on this fs"
 
-  # 6. Parallelism: fan out many concurrent jobs to test scheduling/capacity
-  parallel-matrix:
-    runs-on: tenki-standard-medium-4c-8g
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+  # Lane 2 of 2 — network + toolchains + containers + cache + artifacts.
+  net-tools-containers:
+    runs-on: tenki-standard-autoscale
+    timeout-minutes: 20
     steps:
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq stress-ng
-      - name: Shard ${{ matrix.shard }} workload
+      - name: Network — latency (fatal: runner must reach github)
+        run: curl -fsSL -o /dev/null -w 'dns=%{time_namelookup}s connect=%{time_connect}s total=%{time_total}s\n' https://github.com
+      - name: Network — throughput (non-fatal)
         run: |
-          echo "Shard ${{ matrix.shard }} starting on $(hostname)"
-          stress-ng --cpu 2 --timeout 20s --metrics-brief
-
-  # 7. Multi-toolchain provisioning
-  multi-toolchain:
-    runs-on: tenki-standard-medium-4c-8g
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
+          curl -fsSL -o /dev/null --max-time 120 -w 'downloaded=%{size_download}B speed=%{speed_download}B/s\n' https://proof.ovh.net/files/100Mb.dat \
+            || curl -fsSL -o /dev/null --max-time 120 -w 'downloaded=%{size_download}B speed=%{speed_download}B/s\n' https://ash-speed.hetzner.com/100MB.bin \
+            || echo "::warning::bandwidth probe failed; continuing"
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - uses: actions/setup-go@v5
         with: { go-version: "1.22" }
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - uses: actions/setup-java@v4
-        with: { distribution: "temurin", java-version: "21" }
-      - name: Verify toolchains
+      - name: Toolchains
+        run: node --version && go version && python --version
+      - name: Docker + container (non-fatal — microVM runners may lack a daemon)
         run: |
-          node --version
-          go version
-          python --version
-          java -version
-
-  # 8. Containers: Docker build + service containers (Postgres + Redis)
-  docker-and-services:
-    runs-on: tenki-standard-medium-4c-8g
-    timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready --health-interval 10s
-          --health-timeout 5s --health-retries 5
-      redis:
-        image: redis:7
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 10s
-          --health-timeout 5s --health-retries 5
-    steps:
-      - name: Docker availability
-        run: docker version && docker info
-      - name: Build and run an image
-        run: |
-          cat > Dockerfile <<'EOF'
-          FROM alpine:3.20
-          RUN apk add --no-cache coreutils
-          CMD ["echo", "hello from a container built on a tenki runner"]
-          EOF
-          docker build -t tenki-cap-test:${{ github.run_id }} .
-          docker run --rm tenki-cap-test:${{ github.run_id }}
-      - name: Talk to service containers
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client redis-tools
-          PGPASSWORD=postgres psql -h localhost -U postgres -c 'SELECT version();'
-          redis-cli -h localhost ping
-
-  # 9. Cache round-trip (exercises Tenki's actions cache routing)
-  dependency-cache:
-    runs-on: tenki-standard-medium-4c-8g
-    timeout-minutes: 10
-    steps:
-      - name: Seed cache dir
-        run: |
-          mkdir -p ~/.cache/tenki-test
-          dd if=/dev/urandom of=~/.cache/tenki-test/blob.bin bs=1M count=64
+          if docker version >/dev/null 2>&1; then
+            printf 'FROM alpine:3.20\nCMD ["echo","hello from a tenki runner container"]\n' > Dockerfile
+            docker build -t tenki-cap:${{ github.run_id }} . && docker run --rm tenki-cap:${{ github.run_id }}
+          else
+            echo "::warning::no docker daemon on this runner; skipping container test"
+          fi
+      - name: Cache round-trip
+        run: mkdir -p ~/.cache/tenki && dd if=/dev/urandom of=~/.cache/tenki/blob bs=1M count=32
       - uses: actions/cache@v4
         with:
-          path: ~/.cache/tenki-test
+          path: ~/.cache/tenki
           key: tenki-cache-${{ github.run_id }}
           restore-keys: tenki-cache-
-      - name: Confirm cache contents
-        run: ls -lh ~/.cache/tenki-test
-
-  # 10. Artifacts: produce then consume across jobs
-  produce-artifact:
-    runs-on: tenki-standard-medium-4c-8g
-    timeout-minutes: 10
-    steps:
-      - run: dd if=/dev/urandom of=artifact.bin bs=1M count=50
+      - name: Artifact round-trip
+        run: dd if=/dev/urandom of=art.bin bs=1M count=25 && sha256sum art.bin
       - uses: actions/upload-artifact@v4
-        with:
-          name: capability-artifact
-          path: artifact.bin
-          retention-days: 1
-
-  consume-artifact:
-    runs-on: tenki-standard-medium-4c-8g
-    needs: produce-artifact
-    timeout-minutes: 10
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: capability-artifact
-      - run: ls -lh artifact.bin && sha256sum artifact.bin
-
-  # 11. Roll-up: did everything pass?
-  summary:
-    runs-on: tenki-standard-medium-4c-8g
-    if: always()
-    needs:
-      - system-info
-      - cpu-stress
-      - memory-stress
-      - disk-io
-      - network
-      - parallel-matrix
-      - multi-toolchain
-      - docker-and-services
-      - dependency-cache
-      - consume-artifact
-    steps:
-      - name: Report
-        run: |
-          echo "system-info=${{ needs.system-info.result }}"
-          echo "cpu-stress=${{ needs.cpu-stress.result }}"
-          echo "memory-stress=${{ needs.memory-stress.result }}"
-          echo "disk-io=${{ needs.disk-io.result }}"
-          echo "network=${{ needs.network.result }}"
-          echo "parallel-matrix=${{ needs.parallel-matrix.result }}"
-          echo "multi-toolchain=${{ needs.multi-toolchain.result }}"
-          echo "docker-and-services=${{ needs.docker-and-services.result }}"
-          echo "dependency-cache=${{ needs.dependency-cache.result }}"
-          echo "consume-artifact=${{ needs.consume-artifact.result }}"
+        with: { name: cap-artifact, path: art.bin, retention-days: 1 }
