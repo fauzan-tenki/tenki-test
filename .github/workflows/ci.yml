@@ -22,7 +22,7 @@ concurrency:
 jobs:
   # 1. Baseline: what does this runner actually look like?
   system-info:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
 
   # 2. CPU: saturate all cores
   cpu-stress:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 15
     steps:
       - name: Install bench tools
@@ -60,7 +60,7 @@ jobs:
 
   # 3. Memory: allocate most of RAM
   memory-stress:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 15
     steps:
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq stress-ng
@@ -72,7 +72,7 @@ jobs:
 
   # 4. Disk I/O: sequential + random
   disk-io:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 15
     steps:
       - name: Sequential write/read (dd)
@@ -95,7 +95,7 @@ jobs:
 
   # 5. Network: DNS, latency, bandwidth
   network:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 10
     steps:
       - name: Latency + DNS
@@ -111,7 +111,7 @@ jobs:
 
   # 6. Parallelism: fan out many concurrent jobs to test scheduling/capacity
   parallel-matrix:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -126,18 +126,18 @@ jobs:
 
   # 7. Multi-toolchain provisioning
   multi-toolchain:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: "20" }
+        with: {node-version: "20"}
       - uses: actions/setup-go@v5
-        with: { go-version: "1.22" }
+        with: {go-version: "1.22"}
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with: {python-version: "3.12"}
       - uses: actions/setup-java@v4
-        with: { distribution: "temurin", java-version: "21" }
+        with: {distribution: "temurin", java-version: "21"}
       - name: Verify toolchains
         run: |
           node --version
@@ -147,7 +147,7 @@ jobs:
 
   # 8. Containers: Docker build + service containers (Postgres + Redis)
   docker-and-services:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 15
     services:
       postgres:
@@ -184,7 +184,7 @@ jobs:
 
   # 9. Cache round-trip (exercises Tenki's actions cache routing)
   dependency-cache:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 10
     steps:
       - name: Seed cache dir
@@ -201,7 +201,7 @@ jobs:
 
   # 10. Artifacts: produce then consume across jobs
   produce-artifact:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     timeout-minutes: 10
     steps:
       - run: dd if=/dev/urandom of=artifact.bin bs=1M count=50
@@ -212,7 +212,7 @@ jobs:
           retention-days: 1
 
   consume-artifact:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     needs: produce-artifact
     timeout-minutes: 10
     steps:
@@ -223,7 +223,7 @@ jobs:
 
   # 11. Roll-up: did everything pass?
   summary:
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: tenki-standard-autoscale
     if: always()
     needs:
       - system-info
