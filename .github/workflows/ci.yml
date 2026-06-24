@@ -53,9 +53,9 @@ jobs:
             || curl -fsSL -o /dev/null --max-time 120 -w 'downloaded=%{size_download}B speed=%{speed_download}B/s\n' https://ash-speed.hetzner.com/100MB.bin \
             || echo "::warning::bandwidth probe failed; continuing"
       - uses: actions/setup-node@v4
-        with: { node-version: "20" }
+        with: { node-version: "24" }
       - uses: actions/setup-go@v5
-        with: { go-version: "1.22" }
+        with: { go-version: "1.24" }
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - name: Toolchains
