@@ -15,7 +15,7 @@ concurrency:
 jobs:
   # Lane 1 of 2 - compute + I/O (sequential steps = ONE in-flight slot).
   compute-io:
-    runs-on: tenki-staging-standard-small-2c-4g
+    runs-on: tenki-standard-medium-4c-8g
     timeout-minutes: 20
     steps:
       - name: System info
@@ -41,7 +41,7 @@ jobs:
 
   # Lane 2 of 2 - network + toolchains + containers + cache + artifacts.
   net-tools-containers:
-    runs-on: tenki-staging-standard-small-2c-4g
+    runs-on: tenki-standard-medium-4c-8g
     timeout-minutes: 20
     steps:
       - name: Network latency (runner must reach github)
