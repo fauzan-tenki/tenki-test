@@ -1,0 +1,42 @@
+name: Actions cache (staging)
+
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: actions-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  save:
+    runs-on: tenki-staging-standard-small-2c-4g
+    timeout-minutes: 15
+    steps:
+      - name: Create a 64 MiB cache payload
+        run: |
+          mkdir -p cache-payload
+          head -c $((64 * 1024 * 1024)) /dev/urandom > cache-payload/blob.bin
+          sha256sum cache-payload/blob.bin | tee cache-payload/blob.sha256
+
+      - name: Save cache
+        uses: actions/cache/save@v4
+        with:
+          path: cache-payload
+          key: staging-cache-test-${{ github.run_id }}-${{ github.run_attempt }}
+
+  restore:
+    needs: save
+    runs-on: tenki-staging-standard-small-2c-4g
+    timeout-minutes: 15
+    steps:
+      - name: Restore cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache-payload
+          key: staging-cache-test-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+
+      - name: Verify payload
+        run: sha256sum -c cache-payload/blob.sha256
